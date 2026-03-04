@@ -1,0 +1,101 @@
+# =========================================================
+# 🔷 XGBOOST + SHAP (FULL PIPELINE)
+# =========================================================
+
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+import matplotlib.pyplot as plt
+import seaborn as sns
+import xgboost as xgb
+import shap
+
+# =========================================================
+# 🔷 1) FEATURES + CLEAN
+# =========================================================
+base_features = [
+    "AGE","PTGENDER","APOE4","PTEDUCAT",
+    "CDRSB","ADAS11","ADAS13","MMSE","FAQ",
+    "Ventricles","Hippocampus","WholeBrain",
+    "Entorhinal","Fusiform","MidTemp","ICV",
+    "ABETA_UPENNBIOMK9_04_19_17",
+    "TAU_UPENNBIOMK9_04_19_17",
+    "PTAU_UPENNBIOMK9_04_19_17"
+]
+
+available_features = [f for f in base_features if f in df.columns]
+
+df["PTGENDER"] = df["PTGENDER"].map({"Male":0,"Female":1}).fillna(0)
+diag_map = {"CN":0,"NL":0,"MCI":1,"AD":2,"Dementia":2}
+df["label"] = df["DX"].map(diag_map)
+df = df.dropna(subset=["label"])
+
+df[available_features] = df[available_features].fillna(df[available_features].median())
+
+scaler = StandardScaler()
+df[available_features] = scaler.fit_transform(df[available_features])
+
+# =========================================================
+# 🔷 2) SPLIT
+# =========================================================
+unique_rids = df["RID"].unique()
+last_labels = df.groupby("RID")["label"].last().values
+
+train_rids, test_rids = train_test_split(
+    unique_rids, test_size=0.2, random_state=42, stratify=last_labels
+)
+
+train_df = df[df["RID"].isin(train_rids)]
+test_df  = df[df["RID"].isin(test_rids)]
+
+X_train = train_df.groupby("RID").last()[available_features]
+y_train = train_df.groupby("RID").last()["label"]
+
+X_test = test_df.groupby("RID").last()[available_features]
+y_test = test_df.groupby("RID").last()["label"]
+
+# =========================================================
+# 🔷 3) TRAIN XGBOOST
+# =========================================================
+model = xgb.XGBClassifier(
+    n_estimators=500,
+    max_depth=4,
+    learning_rate=0.05,
+    subsample=0.8,
+    colsample_bytree=0.8
+)
+
+model.fit(X_train,y_train)
+
+probs = model.predict_proba(X_test)
+preds = np.argmax(probs,axis=1)
+
+print(classification_report(y_test, preds,
+                            target_names=['NL','MCI','AD']))
+
+auc_score = roc_auc_score(pd.get_dummies(y_test),
+                          probs, multi_class='ovr')
+print("AUC:", round(auc_score,4))
+
+# =========================================================
+# 🔷 4) CONFUSION MATRIX
+# =========================================================
+cm = confusion_matrix(y_test, preds)
+sns.heatmap(cm,annot=True,fmt='d',
+            xticklabels=['NL','MCI','AD'],
+            yticklabels=['NL','MCI','AD'])
+plt.title("Confusion Matrix - XGBoost")
+plt.show()
+
+# =========================================================
+# 🔷 5) SHAP
+# =========================================================
+explainer = shap.TreeExplainer(model)
+shap_values = explainer.shap_values(X_test)
+
+shap.summary_plot(shap_values,
+                  X_test,
+                  feature_names=available_features,
+                  class_names=['NL','MCI','AD'])
